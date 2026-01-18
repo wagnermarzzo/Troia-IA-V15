@@ -4,27 +4,25 @@ import telebot
 import datetime
 
 # ===============================
-# CONFIGURAÇÃO
+# CONFIGURAÇÃO FIXA
 # ===============================
 TOKEN = "8536239572:AAG82o0mJw9WP3RKGrJTaLp-Hl2q8Gx6HYY"
 CHAT_ID = "2055716345"
+API_KEY = "128da1172fbb4aef83ca801cb3e6b928"
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
-# Lista de ativos válidos Binance Spot
+# Lista de ativos válidos em Twelve Data
 ATIVOS = [
-    "EURUSDT", "GBPUSDT", "AUDUSDT", "NZDUSDT",
-    "BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT",
-    "SOLUSDT", "XRPUSDT"
+    "EUR/USD", "GBP/USD", "AUD/USD", "NZD/USD",
+    "BTC/USD", "ETH/USD", "BNB/USD", "ADA/USD",
+    "SOL/USD", "XRP/USD"
 ]
 
 INTERVALO = 60  # segundos
-TIMEFRAME = "1m"
 MOVIMENTO_MINIMO = 0.0005
 
 # Estatísticas globais
-stats = {
-    "green_seq": 0
-}
+stats = {"green_seq": 0}
 
 # Últimos sinais de cada ativo
 sinais_ativos = {ativo: {"sinal": None, "forca": None, "prob": None, "resultado": "🟡"} for ativo in ATIVOS}
@@ -33,28 +31,26 @@ sinais_ativos = {ativo: {"sinal": None, "forca": None, "prob": None, "resultado"
 # PEGAR CANDLES
 # ===============================
 def pegar_candles(ativo, limite=3):
-    url = f"https://api.binance.com/api/v3/klines?symbol={ativo}&interval={TIMEFRAME}&limit={limite}"
+    url = f"https://api.twelvedata.com/time_series?symbol={ativo}&interval=1min&apikey={API_KEY}&outputsize={limite}"
     try:
         r = requests.get(url, timeout=5)
         data = r.json()
-        
-        if not isinstance(data, list):
-            print(f"Erro API Binance {ativo}: {data}")
+        if "values" not in data:
+            print(f"Erro API Twelve Data {ativo}: {data}")
             return []
 
         candles = []
-        for c in data:
-            if isinstance(c, list) and len(c) >= 5:
-                try:
-                    candles.append({
-                        "open": float(c[1]),
-                        "high": float(c[2]),
-                        "low": float(c[3]),
-                        "close": float(c[4]),
-                        "time": datetime.datetime.fromtimestamp(int(c[0])/1000).strftime('%Y-%m-%d %H:%M:%S')
-                    })
-                except:
-                    continue
+        for c in reversed(data["values"]):
+            try:
+                candles.append({
+                    "open": float(c["open"]),
+                    "high": float(c["high"]),
+                    "low": float(c["low"]),
+                    "close": float(c["close"]),
+                    "time": c["datetime"]
+                })
+            except:
+                continue
         return candles
     except Exception as e:
         print(f"Erro ao pegar candles {ativo}: {e}")
@@ -66,9 +62,7 @@ def pegar_candles(ativo, limite=3):
 def analisar_candles(candles):
     if len(candles) < 3:
         return None, None, 0
-    ultimo = candles[-1]
-    prev1 = candles[-2]
-    prev2 = candles[-3]
+    ultimo, prev1, prev2 = candles[-1], candles[-2], candles[-3]
 
     movimento = abs(ultimo["close"] - ultimo["open"])
     pct_mov = movimento / ultimo["open"]
@@ -130,9 +124,8 @@ def enviar_sinais():
 # ===============================
 # LOOP PRINCIPAL
 # ===============================
-print("Troia Bot IA iniciado...")
+print("Troia Bot IA iniciado com Twelve Data...")
 while True:
-    # Analisar sinais para cada ativo
     for ativo in ATIVOS:
         candles = pegar_candles(ativo, limite=3)
         if candles:
@@ -142,8 +135,6 @@ while True:
                 sinais_ativos[ativo]["forca"] = forca
                 sinais_ativos[ativo]["prob"] = prob
 
-    # Checar resultados das velas reais
     checar_resultados()
-    # Enviar painel limpo de sinais
     enviar_sinais()
     time.sleep(INTERVALO)
