@@ -1,7 +1,7 @@
 import requests
 import json
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import telebot
 
 # ===============================
@@ -49,7 +49,11 @@ def twelve_api_candle(ativo):
         resp = requests.get(url, timeout=10).json()
         if "values" in resp:
             val = resp["values"][0]
-            return {"open": float(val["open"]), "close": float(val["close"]), "time": datetime.strptime(val["datetime"], "%Y-%m-%d %H:%M:%S")}
+            return {
+                "open": float(val["open"]),
+                "close": float(val["close"]),
+                "time": datetime.strptime(val["datetime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            }
         else:
             print(f"Erro API Twelve Data {ativo}: {resp}")
             return None
@@ -64,13 +68,16 @@ def candle_yf(ativo):
         data = yf.download(symbol, period="1d", interval="1m", progress=False)
         if not data.empty:
             last = data.iloc[-1]
-            return {"open": float(last["Open"]), "close": float(last["Close"]), "time": last.name.to_pydatetime()}
+            time_candle = last.name.to_pydatetime()
+            if time_candle.tzinfo is None:
+                time_candle = time_candle.replace(tzinfo=timezone.utc)
+            return {"open": float(last["Open"]), "close": float(last["Close"]), "time": time_candle}
     except Exception as e:
         print(f"Erro yfinance {ativo}: {e}")
     return None
 
 def twelve_api_candle_cache(ativo):
-    agora = datetime.now()
+    agora = datetime.now(timezone.utc)
     if ativo in ultimo_candle:
         candle, ts = ultimo_candle[ativo]
         if (agora - ts).seconds < 60:
@@ -113,7 +120,8 @@ def checar_resultado(sinal):
 
 def candle_fechado(candle):
     """Verifica se candle já fechou"""
-    return datetime.now() >= candle["time"] + timedelta(minutes=1)
+    agora = datetime.now(timezone.utc)
+    return agora >= candle["time"] + timedelta(minutes=1)
 
 # ===============================
 # LOOP PRINCIPAL
@@ -122,12 +130,12 @@ green_seq = 0
 total = 0
 acertos = 0
 erros = 0
-ultimo_status = datetime.now() - timedelta(minutes=STATUS_INTERVAL)
+ultimo_status = datetime.now(timezone.utc) - timedelta(minutes=STATUS_INTERVAL)
 
 print("🤖 Troia Bot IA iniciado!")
 
 while True:
-    agora = datetime.now()
+    agora = datetime.now(timezone.utc)
 
     # 1️⃣ Mensagem periódica de status
     if (agora - ultimo_status).seconds >= STATUS_INTERVAL * 60:
@@ -139,24 +147,26 @@ while True:
 
     # 2️⃣ Checa sinais pendentes
     sinal_atual = next((h for h in historico if h["resultado"] == "PENDENTE"), None)
-    if sinal_atual and candle_fechado(twelve_api_candle_cache(sinal_atual["ativo"])):
-        resultado = checar_resultado(sinal_atual)
-        if resultado:
-            sinal_atual["resultado"] = resultado
-            salvar_historico(historico)
-            total += 1
-            if "Green" in resultado:
-                acertos += 1
-                green_seq += 1
-            else:
-                erros += 1
-                green_seq = 0
-            # envia resultado
-            try:
-                msg = f"📊 *RESULTADO DO SINAL*\nAtivo: `{sinal_atual['ativo']}`\nTipo: *{sinal_atual['tipo']}*\nResultado: {resultado}\n💚 Green Seq: {green_seq}\n📈 Total: {total} | Acertos: {acertos} | Erros: {erros}"
-                bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-            except Exception as e:
-                print(f"Erro Telegram resultado: {e}")
+    if sinal_atual:
+        candle = twelve_api_candle_cache(sinal_atual["ativo"])
+        if candle and candle_fechado(candle):
+            resultado = checar_resultado(sinal_atual)
+            if resultado:
+                sinal_atual["resultado"] = resultado
+                salvar_historico(historico)
+                total += 1
+                if "Green" in resultado:
+                    acertos += 1
+                    green_seq += 1
+                else:
+                    erros += 1
+                    green_seq = 0
+                # envia resultado
+                try:
+                    msg = f"📊 *RESULTADO DO SINAL*\nAtivo: `{sinal_atual['ativo']}`\nTipo: *{sinal_atual['tipo']}*\nResultado: {resultado}\n💚 Green Seq: {green_seq}\n📈 Total: {total} | Acertos: {acertos} | Erros: {erros}"
+                    bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
+                except Exception as e:
+                    print(f"Erro Telegram resultado: {e}")
         time.sleep(5)
         continue
 
@@ -166,7 +176,7 @@ while True:
         if candle and candle_fechado(candle):
             sinal_tipo = gerar_sinal(candle)
             if sinal_tipo:
-                agora = datetime.now()
+                agora = datetime.now(timezone.utc)
                 entrada = agora + timedelta(minutes=1)
                 novo_sinal = {
                     "ativo": ativo,
