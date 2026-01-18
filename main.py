@@ -8,14 +8,14 @@ import yfinance as yf
 # ===============================
 # CONFIGURAÇÃO
 # ===============================
-TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"  # seu token
-CHAT_ID = "2055716345"  # seu chat id
+TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
+CHAT_ID = "2055716345"
 STATUS_INTERVAL = 5  # minutos entre mensagens de status
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
 # ===============================
-# ATIVOS (Forex e Cripto)
+# ATIVOS
 # ===============================
 ATIVOS = [
     "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "NZD/USD",
@@ -23,7 +23,6 @@ ATIVOS = [
     "BTC/USD", "ETH/USD", "BNB/USD", "ADA/USD", "SOL/USD", "XRP/USD"
 ]
 
-# Mapear para símbolos yfinance
 YF_SYMBOLS = {
     "EUR/USD":"EURUSD=X", "GBP/USD":"GBPUSD=X", "USD/JPY":"USDJPY=X",
     "AUD/USD":"AUDUSD=X", "NZD/USD":"NZDUSD=X", "EUR/JPY":"EURJPY=X",
@@ -39,6 +38,11 @@ HISTORICO_FILE = "historico.json"
 try:
     with open(HISTORICO_FILE, "r") as f:
         historico = json.load(f)
+        # Corrige datetime de strings
+        for h in historico:
+            for key in ["analisada", "entrada"]:
+                if key in h and isinstance(h[key], str):
+                    h[key] = datetime.fromisoformat(h[key])
 except FileNotFoundError:
     historico = []
 
@@ -51,7 +55,6 @@ def candle_yf(ativo):
         data = yf.download(symbol, period="1d", interval="1m", progress=False)
         if not data.empty:
             last = data.iloc[-1]
-            # Corrigir warning
             open_p = float(last["Open"])
             close_p = float(last["Close"])
             time_candle = last.name.to_pydatetime().replace(tzinfo=timezone.utc)
@@ -61,7 +64,6 @@ def candle_yf(ativo):
     return None
 
 def candle_fechado(candle):
-    # Compara UTC
     agora = datetime.now(timezone.utc)
     return agora >= candle["time"] + timedelta(minutes=1)
 
@@ -77,15 +79,18 @@ def gerar_sinal(candle):
     return None
 
 def salvar_historico():
+    to_save = []
     for entry in historico:
+        save_entry = entry.copy()
         for key in ["analisada", "entrada"]:
-            if isinstance(entry.get(key), datetime):
-                entry[key] = entry[key].isoformat()
+            if isinstance(save_entry.get(key), datetime):
+                save_entry[key] = save_entry[key].isoformat()
+        to_save.append(save_entry)
     with open(HISTORICO_FILE, "w") as f:
-        json.dump(historico, f, indent=2)
+        json.dump(to_save, f, indent=2)
 
 def enviar_sinal_telegram(sinal):
-    entrada_local = sinal["entrada"].astimezone()  # horário local
+    entrada_local = sinal["entrada"].astimezone() if isinstance(sinal["entrada"], datetime) else datetime.now()
     msg = (
         f"📊 **TROIA BOT IA - NOVO SINAL**\n"
         f"Ativo: {sinal['ativo']}\n"
@@ -107,7 +112,11 @@ def enviar_resultado_telegram(sinal, resultado, green_seq, total, acertos, erros
 
 def checar_resultado(sinal):
     candle = candle_yf(sinal["ativo"])
-    if not candle or not candle_fechado(candle):
+    if not candle:
+        return None
+    # só verifica resultado após a vela de entrada fechar
+    agora = datetime.now(timezone.utc)
+    if agora < sinal["entrada"] + timedelta(minutes=1):
         return None
     close_p = candle["close"]
     open_p = candle["open"]
@@ -141,41 +150,40 @@ while True:
     # 2️⃣ Checa se existe sinal pendente
     sinal_atual = next((h for h in historico if h["resultado"]=="PENDENTE"), None)
     if sinal_atual:
-        entrada = datetime.fromisoformat(sinal_atual["entrada"])
-        if agora >= entrada:
-            resultado = checar_resultado(sinal_atual)
-            if resultado:
-                sinal_atual["resultado"] = resultado
-                salvar_historico()
-                total += 1
-                if resultado == "Green":
-                    acertos += 1
-                    green_seq += 1
-                else:
-                    erros += 1
-                    green_seq = 0
-                try:
-                    enviar_resultado_telegram(sinal_atual, resultado, green_seq, total, acertos, erros)
-                except Exception as e:
-                    print(f"Erro Telegram resultado: {e}")
+        resultado = checar_resultado(sinal_atual)
+        if resultado:
+            sinal_atual["resultado"] = resultado
+            salvar_historico()
+            total += 1
+            if resultado == "Green":
+                acertos += 1
+                green_seq += 1
+            else:
+                erros += 1
+                green_seq = 0
+            try:
+                enviar_resultado_telegram(sinal_atual, resultado, green_seq, total, acertos, erros)
+            except Exception as e:
+                print(f"Erro Telegram resultado: {e}")
         time.sleep(5)
         continue  # só processa 1 sinal por vez
 
-    # 3️⃣ Gera novo sinal
+    # 3️⃣ Gera novo sinal apenas se não há sinal pendente
     for ativo in ATIVOS:
         candle = candle_yf(ativo)
         if not candle or not candle_fechado(candle):
             continue
         sinal_tipo = gerar_sinal(candle)
         if sinal_tipo:
-            entrada = candle["time"] + timedelta(minutes=1)  # próxima vela
+            # entrada na próxima vela
+            entrada = candle["time"] + timedelta(minutes=1)
             novo_sinal = {
                 "ativo": ativo,
                 "tipo": sinal_tipo,
                 "analisada": agora,
                 "entrada": entrada,
                 "resultado": "PENDENTE",
-                "probabilidade": 60  # placeholder, depois pode calcular
+                "probabilidade": 60
             }
             historico.append(novo_sinal)
             salvar_historico()
