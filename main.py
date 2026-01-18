@@ -10,7 +10,8 @@ import telebot
 TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 CHAT_ID = "2055716345"
 API_KEY = "128da1172fbb4aef83ca801cb3e6b928"
-USE_YFINANCE = True  # True = usa Yahoo Finance (sem limite), False = usa Twelve Data
+USE_YFINANCE = True  # True = Yahoo Finance (sem limite), False = Twelve Data
+STATUS_INTERVAL = 5  # minutos entre mensagens de "bot ativo"
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
@@ -43,13 +44,12 @@ ultimo_candle = {}  # chave = ativo, valor = (candle, timestamp)
 # FUNÇÕES
 # ===============================
 def twelve_api_candle(ativo):
-    """Pega candle mais recente da Twelve Data"""
     symbol = ativo.replace("/", "")
     url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1min&apikey={API_KEY}&outputsize=2"
     try:
         resp = requests.get(url, timeout=10).json()
         if "values" in resp:
-            return resp["values"][0]  # candle mais recente
+            return resp["values"][0]
         else:
             print(f"Erro API Twelve Data {ativo}: {resp}")
             return None
@@ -58,7 +58,6 @@ def twelve_api_candle(ativo):
         return None
 
 def candle_yf(ativo):
-    """Usa Yahoo Finance para pegar candle (sem limite diário)"""
     try:
         import yfinance as yf
         symbol = ativo.replace("/", "") + "=X"
@@ -71,20 +70,17 @@ def candle_yf(ativo):
     return None
 
 def twelve_api_candle_cache(ativo):
-    """Cache de candle por ativo, atualiza a cada 60s"""
     agora = datetime.now()
     if ativo in ultimo_candle:
         candle, ts = ultimo_candle[ativo]
         if (agora - ts).seconds < 60:
             return candle
-    # consulta API
     candle = candle_yf(ativo) if USE_YFINANCE else twelve_api_candle(ativo)
     if candle:
         ultimo_candle[ativo] = (candle, agora)
     return candle
 
 def gerar_sinal(candle):
-    """Exemplo simples de Price Action: fechamento acima abertura = CALL"""
     if not candle:
         return None
     open_p = float(candle["open"])
@@ -97,7 +93,6 @@ def gerar_sinal(candle):
         return None
 
 def salvar_historico(h):
-    """Salva histórico convertendo datetime para string"""
     for entry in h:
         for key in ["analisada", "entrada"]:
             if isinstance(entry.get(key), datetime):
@@ -106,7 +101,6 @@ def salvar_historico(h):
         json.dump(h, f, indent=2)
 
 def checar_resultado(sinal):
-    """Verifica resultado da vela de entrada"""
     candle = twelve_api_candle_cache(sinal["ativo"])
     if not candle:
         return None
@@ -124,15 +118,24 @@ green_seq = 0
 total = 0
 acertos = 0
 erros = 0
+ultimo_status = datetime.now() - timedelta(minutes=STATUS_INTERVAL)
 
 print("🤖 Troia Bot IA iniciado!")
 
 while True:
-    # 1️⃣ Checa sinais pendentes
-    sinal_atual = next((h for h in historico if h["resultado"] == "PENDENTE"), None)
+    agora = datetime.now()
 
+    # 1️⃣ Mensagem periódica de referência (bot ativo)
+    if (agora - ultimo_status).seconds >= STATUS_INTERVAL * 60:
+        try:
+            bot.send_message(CHAT_ID, "🤖 TROIA BOT IA está ativo e analisando os ativos...")
+        except Exception as e:
+            print(f"Erro Telegram status: {e}")
+        ultimo_status = agora
+
+    # 2️⃣ Checa sinais pendentes
+    sinal_atual = next((h for h in historico if h["resultado"] == "PENDENTE"), None)
     if sinal_atual:
-        agora = datetime.now()
         entrada = datetime.strptime(sinal_atual["entrada"], "%Y-%m-%d %H:%M:%S") \
             if isinstance(sinal_atual["entrada"], str) else sinal_atual["entrada"]
         if agora >= entrada:
@@ -147,21 +150,16 @@ while True:
                 else:
                     erros += 1
                     green_seq = 0
-                msg = f"📊 **RESULTADO DO SINAL**\n\n"
-                msg += f"{sinal_atual['ativo']}: {sinal_atual['tipo']}\n"
-                msg += f"Resultado: {resultado}\n"
-                msg += f"💚 Green Seq: {green_seq}\n"
-                msg += f"📈 Total: {total} | Acertos: {acertos} | Erros: {erros}\n"
+                # envia resultado do sinal
                 try:
+                    msg = f"📊 **RESULTADO DO SINAL**\n{sinal_atual['ativo']}: {sinal_atual['tipo']}\nResultado: {resultado}\n💚 Green Seq: {green_seq}\n📈 Total: {total} | Acertos: {acertos} | Erros: {erros}"
                     bot.send_message(CHAT_ID, msg)
                 except Exception as e:
-                    print(f"Erro Telegram: {e}")
-        else:
-            print(f"Aguardando entrada de {sinal_atual['ativo']}...")
+                    print(f"Erro Telegram resultado: {e}")
         time.sleep(10)
         continue
 
-    # 2️⃣ Se não tiver sinal pendente, analisa novos ativos
+    # 3️⃣ Analisa ativos e gera novos sinais (1 por loop)
     for ativo in ATIVOS:
         candle = twelve_api_candle_cache(ativo)
         sinal_tipo = gerar_sinal(candle)
@@ -177,18 +175,11 @@ while True:
             }
             historico.append(novo_sinal)
             salvar_historico(historico)
-            total += 1
-            msg = f"📊 **TROIA BOT IA - SINAL ÚNICO**\n\n"
-            msg += f"{ativo}: 📈 {sinal_tipo}\n"
-            msg += f"⏱ Analisada: {agora.strftime('%H:%M')}\n"
-            msg += f"⏱ Entrada: {entrada.strftime('%H:%M')}\n"
-            msg += f"Resultado: 🟡 PENDENTE\n"
-            msg += f"💚 Green Seq: {green_seq}\n"
-            msg += f"📈 Total: {total} | Acertos: {acertos} | Erros: {erros}\n"
             try:
+                msg = f"📊 **TROIA BOT IA - SINAL ÚNICO**\n{ativo}: {sinal_tipo}\nEntrada: {entrada.strftime('%H:%M')}"
                 bot.send_message(CHAT_ID, msg)
             except Exception as e:
-                print(f"Erro Telegram: {e}")
-            break  # só gera 1 sinal por loop
+                print(f"Erro Telegram novo sinal: {e}")
+            break  # apenas 1 sinal por loop
 
-    time.sleep(30)  # evita flood e excesso de chamadas
+    time.sleep(10)
