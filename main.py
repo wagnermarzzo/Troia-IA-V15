@@ -12,6 +12,7 @@ CHAT_ID = "2055716345"
 API_KEY = "128da1172fbb4aef83ca801cb3e6b928"
 USE_YFINANCE = True
 STATUS_INTERVAL = 5  # minutos entre mensagens de "bot ativo"
+THRESHOLD = 0.0005  # 0.05% de variação mínima
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
@@ -71,7 +72,9 @@ def candle_yf(ativo):
             time_candle = last.name.to_pydatetime()
             if time_candle.tzinfo is None:
                 time_candle = time_candle.replace(tzinfo=timezone.utc)
-            return {"open": float(last["Open"]), "close": float(last["Close"]), "time": time_candle}
+            open_val = float(last["Open"].iloc[0]) if hasattr(last["Open"], "iloc") else float(last["Open"])
+            close_val = float(last["Close"].iloc[0]) if hasattr(last["Close"], "iloc") else float(last["Close"])
+            return {"open": open_val, "close": close_val, "time": time_candle}
     except Exception as e:
         print(f"Erro yfinance {ativo}: {e}")
     return None
@@ -92,12 +95,11 @@ def gerar_sinal(candle):
         return None
     open_p = float(candle["open"])
     close_p = float(candle["close"])
-    if close_p > open_p:
-        return "CALL"
-    elif close_p < open_p:
-        return "PUT"
-    else:
+    diff = abs(close_p - open_p)
+    # só considera se passar threshold
+    if diff / open_p < THRESHOLD:
         return None
+    return "CALL" if close_p > open_p else "PUT"
 
 def salvar_historico(h):
     for entry in h:
@@ -146,8 +148,7 @@ while True:
         ultimo_status = agora
 
     # 2️⃣ Checa sinais pendentes
-    sinal_atual = next((h for h in historico if h["resultado"] == "PENDENTE"), None)
-    if sinal_atual:
+    for sinal_atual in [h for h in historico if h["resultado"] == "PENDENTE"]:
         candle = twelve_api_candle_cache(sinal_atual["ativo"])
         if candle and candle_fechado(candle):
             resultado = checar_resultado(sinal_atual)
@@ -161,16 +162,13 @@ while True:
                 else:
                     erros += 1
                     green_seq = 0
-                # envia resultado
                 try:
                     msg = f"📊 *RESULTADO DO SINAL*\nAtivo: `{sinal_atual['ativo']}`\nTipo: *{sinal_atual['tipo']}*\nResultado: {resultado}\n💚 Green Seq: {green_seq}\n📈 Total: {total} | Acertos: {acertos} | Erros: {erros}"
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
                 except Exception as e:
                     print(f"Erro Telegram resultado: {e}")
-        time.sleep(5)
-        continue
 
-    # 3️⃣ Analisa ativos e gera novos sinais
+    # 3️⃣ Analisa todos os ativos e gera novos sinais confiáveis
     for ativo in ATIVOS:
         candle = twelve_api_candle_cache(ativo)
         if candle and candle_fechado(candle):
@@ -178,6 +176,10 @@ while True:
             if sinal_tipo:
                 agora = datetime.now(timezone.utc)
                 entrada = agora + timedelta(minutes=1)
+                # evita duplicar sinal para o mesmo candle
+                exists = any(h["ativo"] == ativo and h["entrada"] == entrada.strftime("%Y-%m-%d %H:%M:%S") for h in historico)
+                if exists:
+                    continue
                 novo_sinal = {
                     "ativo": ativo,
                     "tipo": sinal_tipo,
@@ -193,6 +195,5 @@ while True:
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
                 except Exception as e:
                     print(f"Erro Telegram novo sinal: {e}")
-                break  # apenas 1 sinal por loop
 
     time.sleep(10)
