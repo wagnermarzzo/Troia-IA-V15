@@ -35,6 +35,12 @@ try:
 except FileNotFoundError:
     historico = []
 
+# Converte strings do histórico para datetime
+for entry in historico:
+    for key in ["analisada", "entrada"]:
+        if isinstance(entry.get(key), str):
+            entry[key] = LOCAL_TZ.localize(datetime.strptime(entry[key], "%Y-%m-%d %H:%M:%S"))
+
 # ===============================
 # CACHE DE CANDLES
 # ===============================
@@ -104,7 +110,7 @@ def checar_resultado(sinal):
 # LOOP PRINCIPAL
 # ===============================
 ultimo_status = datetime.now(LOCAL_TZ) - timedelta(minutes=STATUS_INTERVAL)
-sinal_ativo = None
+sinal_ativo = next((h for h in historico if h["resultado"] == "PENDENTE"), None)
 green_seq = 0
 total = 0
 acertos = 0
@@ -126,6 +132,10 @@ while True:
 
     # 2️⃣ Checar resultado do sinal ativo
     if sinal_ativo:
+        # Certifica que "entrada" é datetime
+        if isinstance(sinal_ativo["entrada"], str):
+            sinal_ativo["entrada"] = LOCAL_TZ.localize(datetime.strptime(sinal_ativo["entrada"], "%Y-%m-%d %H:%M:%S"))
+
         if agora >= sinal_ativo["entrada"] + timedelta(minutes=1):
             resultado = checar_resultado(sinal_ativo)
             if resultado:
