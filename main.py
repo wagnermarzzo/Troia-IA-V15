@@ -8,10 +8,10 @@ import yfinance as yf
 # ===============================
 # CONFIGURAÇÃO
 # ===============================
-TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"  # SEU TOKEN
-CHAT_ID = "2055716345"  # SEU CHAT ID
+TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"  # seu token
+CHAT_ID = "2055716345"  # seu chat id
 STATUS_INTERVAL = 5  # minutos entre mensagens de "bot ativo"
-PROB_THRESHOLD = 60  # destaque se probabilidade histórica >= 60%
+USE_YFINANCE = True  # estamos usando yfinance
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
@@ -24,19 +24,28 @@ ATIVOS = [
     "BTC/USD", "ETH/USD", "BNB/USD", "ADA/USD", "SOL/USD", "XRP/USD"
 ]
 
+# Símbolos corretos para yfinance
 YF_SYMBOLS = {
-    "EUR/USD":"EURUSD=X", "GBP/USD":"GBPUSD=X", "USD/JPY":"USDJPY=X",
-    "AUD/USD":"AUDUSD=X", "NZD/USD":"NZDUSD=X", "EUR/JPY":"EURJPY=X",
-    "GBP/JPY":"GBPJPY=X", "EUR/GBP":"EURGBP=X",
-    "BTC/USD":"BTC-USD", "ETH/USD":"ETH-USD", "BNB/USD":"BNB-USD",
-    "ADA/USD":"ADA-USD", "SOL/USD":"SOL-USD", "XRP/USD":"XRP-USD"
+    "EUR/USD": "EURUSD=X",
+    "GBP/USD": "GBPUSD=X",
+    "USD/JPY": "USDJPY=X",
+    "AUD/USD": "AUDUSD=X",
+    "NZD/USD": "NZDUSD=X",
+    "EUR/JPY": "EURJPY=X",
+    "GBP/JPY": "GBPJPY=X",
+    "EUR/GBP": "EURGBP=X",
+    "BTC/USD": "BTC-USD",
+    "ETH/USD": "ETH-USD",
+    "BNB/USD": "BNB-USD",
+    "ADA/USD": "ADA-USD",
+    "SOL/USD": "SOL-USD",
+    "XRP/USD": "XRP-USD"
 }
 
 # ===============================
 # HISTÓRICO
 # ===============================
 HISTORICO_FILE = "historico.json"
-
 try:
     with open(HISTORICO_FILE, "r") as f:
         historico = json.load(f)
@@ -46,48 +55,45 @@ except FileNotFoundError:
 # ===============================
 # CACHE DE CANDLES
 # ===============================
-ultimo_candle = {}  # chave=ativo, valor=(candle, timestamp)
+ultimo_candle = {}  # chave = ativo, valor = (candle, timestamp)
 
 # ===============================
 # FUNÇÕES
 # ===============================
+def candle_yf(ativo):
+    try:
+        symbol = YF_SYMBOLS[ativo]
+        data = yf.download(symbol, period="1d", interval="1m", progress=False)
+        if not data.empty:
+            last = data.iloc[-1]
+            time_candle = last.name.to_pydatetime().replace(tzinfo=timezone.utc)
+            return {"open": float(last["Open"]), "close": float(last["Close"]), "time": time_candle}
+    except Exception as e:
+        print(f"Erro yfinance {ativo}: {e}")
+    return None
+
 def candle_cache(ativo):
     agora = datetime.now(timezone.utc)
     if ativo in ultimo_candle:
         candle, ts = ultimo_candle[ativo]
-        if (agora - ts).seconds < 60:
+        if (agora - ts).total_seconds() < 60:
             return candle
-    symbol = YF_SYMBOLS[ativo]
-    try:
-        data = yf.download(symbol, period="1d", interval="1m", progress=False)
-        if data.empty:
-            return None
-        last = data.iloc[-1]
-        time_candle = last.name.to_pydatetime().replace(tzinfo=timezone.utc)
-        candle = {
-            "open": float(last["Open"]),
-            "close": float(last["Close"]),
-            "time": time_candle
-        }
+    candle = candle_yf(ativo)
+    if candle:
         ultimo_candle[ativo] = (candle, agora)
-        return candle
-    except Exception as e:
-        print(f"Erro yfinance {ativo}: {e}")
-        return None
+    return candle
 
 def gerar_sinal(candle):
     if not candle:
         return None
-    open_p = candle["open"]
-    close_p = candle["close"]
-    if close_p > open_p:
+    if candle["close"] > candle["open"]:
         return "CALL"
-    elif close_p < open_p:
+    elif candle["close"] < candle["open"]:
         return "PUT"
-    else:
-        return None
+    return None
 
-def salvar_historico(h):
+def salvar_historico():
+    h = historico.copy()
     for entry in h:
         for key in ["analisada", "entrada"]:
             if isinstance(entry.get(key), datetime):
@@ -95,109 +101,104 @@ def salvar_historico(h):
     with open(HISTORICO_FILE, "w") as f:
         json.dump(h, f, indent=2)
 
-def calcular_probabilidade(ativo, tipo):
-    historico_ativo = [h for h in historico if h["ativo"]==ativo and h["tipo"]==tipo and h["resultado"] in ["Green","Red"]]
-    if not historico_ativo:
-        return 0
-    greens = sum(1 for h in historico_ativo if h["resultado"]=="Green")
-    return round(greens/len(historico_ativo)*100,2)
+def candle_fechado(candle):
+    agora = datetime.now(timezone.utc)
+    return agora >= candle["time"] + timedelta(minutes=1)
 
 def checar_resultado(sinal):
     agora = datetime.now(timezone.utc)
-    # espera candle de entrada fechar
     if agora < sinal["entrada"] + timedelta(minutes=1):
         return None
     candle = candle_cache(sinal["ativo"])
     if not candle:
         return None
-    open_p = candle["open"]
-    close_p = candle["close"]
     if sinal["tipo"] == "CALL":
-        return "Green" if close_p > open_p else "Red"
+        return "Green" if candle["close"] > candle["open"] else "Red"
     else:
-        return "Green" if close_p < open_p else "Red"
+        return "Green" if candle["close"] < candle["open"] else "Red"
 
 # ===============================
 # LOOP PRINCIPAL
 # ===============================
-ultimo_status = datetime.now(timezone.utc) - timedelta(minutes=STATUS_INTERVAL)
 green_seq = 0
 total = 0
 acertos = 0
 erros = 0
+ultimo_status = datetime.now(timezone.utc) - timedelta(minutes=STATUS_INTERVAL)
 
 print("🤖 Troia Bot IA iniciado!")
 
 while True:
     agora = datetime.now(timezone.utc)
 
-    # Mensagem de status
-    if (agora - ultimo_status).seconds >= STATUS_INTERVAL*60:
+    # 1️⃣ Mensagem periódica (bot ativo)
+    if (agora - ultimo_status).total_seconds() >= STATUS_INTERVAL*60:
         try:
             bot.send_message(CHAT_ID, "🤖 TROIA BOT IA está ativo e analisando os ativos...")
         except Exception as e:
             print(f"Erro Telegram status: {e}")
         ultimo_status = agora
 
-    # Checa sinal pendente
-    sinal_atual = next((s for s in historico if s["resultado"]=="PENDENTE"), None)
+    # 2️⃣ Checa se há sinal pendente
+    sinal_atual = next((h for h in historico if h["resultado"] == "PENDENTE"), None)
+
     if sinal_atual:
-        resultado = checar_resultado(sinal_atual)
+        entrada = sinal_atual["entrada"]
+        if isinstance(entrada, str):
+            entrada = datetime.strptime(entrada, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        resultado = checar_resultado({**sinal_atual, "entrada": entrada})
         if resultado:
             sinal_atual["resultado"] = resultado
-            salvar_historico(historico)
-            total +=1
-            if resultado=="Green":
-                acertos+=1
-                green_seq+=1
+            salvar_historico()
+            total += 1
+            if resultado == "Green":
+                acertos += 1
+                green_seq += 1
             else:
-                erros+=1
-                green_seq=0
-            prob = calcular_probabilidade(sinal_atual["ativo"], sinal_atual["tipo"])
-            destaque = "💥 ENTRADA SEGURA!" if prob>=PROB_THRESHOLD else ""
+                erros += 1
+                green_seq = 0
+            # envia resultado
+            msg = (
+                f"📊 **RESULTADO DO SINAL**\n"
+                f"{sinal_atual['ativo']}: {sinal_atual['tipo']}\n"
+                f"Resultado: {resultado}\n"
+                f"💚 Green Seq: {green_seq}\n"
+                f"📈 Total: {total} | Acertos: {acertos} | Erros: {erros}\n"
+                f"⏰ Hora do resultado: {datetime.now().strftime('%H:%M:%S')}"
+            )
             try:
-                msg = f"""📊 **RESULTADO DO SINAL** {destaque}
-{sinal_atual['ativo']}: {sinal_atual['tipo']}
-Resultado: {resultado}
-Probabilidade histórica: {prob}%
-💚 Green Seq: {green_seq}
-📈 Total: {total} | Acertos: {acertos} | Erros: {erros}"""
                 bot.send_message(CHAT_ID, msg)
             except Exception as e:
                 print(f"Erro Telegram resultado: {e}")
-        time.sleep(10)
-        continue
+        time.sleep(5)
+        continue  # só processa o próximo sinal após resultado
 
-    # Nenhum sinal pendente → analisa todos ativos e gera próximo sinal
+    # 3️⃣ Analisa todos os ativos e gera **apenas 1 sinal por vez**
     for ativo in ATIVOS:
-        if any(s for s in historico if s["ativo"]==ativo and s["resultado"]=="PENDENTE"):
-            continue
         candle = candle_cache(ativo)
-        if not candle:
-            continue
-        sinal_tipo = gerar_sinal(candle)
-        if sinal_tipo:
-            # entrada é o próximo candle
-            proximo_minuto = (candle["time"] + timedelta(minutes=1)).replace(second=0,microsecond=0)
-            novo_sinal = {
-                "ativo": ativo,
-                "tipo": sinal_tipo,
-                "analisada": agora,
-                "entrada": proximo_minuto,
-                "resultado": "PENDENTE"
-            }
-            historico.append(novo_sinal)
-            salvar_historico(historico)
-            prob = calcular_probabilidade(ativo,sinal_tipo)
-            destaque = "💥 ENTRADA SEGURA!" if prob>=PROB_THRESHOLD else ""
-            try:
-                msg = f"""📊 **TROIA BOT IA - NOVO SINAL** {destaque}
-{ativo}: {sinal_tipo}
-Entrada (candle): {proximo_minuto.strftime('%H:%M')}
-Probabilidade histórica: {prob}%"""
-                bot.send_message(CHAT_ID,msg)
-            except Exception as e:
-                print(f"Erro Telegram novo sinal: {e}")
-            break  # somente 1 sinal por vez
+        if candle and candle_fechado(candle):
+            sinal_tipo = gerar_sinal(candle)
+            if sinal_tipo:
+                entrada = candle["time"] + timedelta(minutes=1)
+                novo_sinal = {
+                    "ativo": ativo,
+                    "tipo": sinal_tipo,
+                    "analisada": datetime.now(timezone.utc),
+                    "entrada": entrada,
+                    "resultado": "PENDENTE"
+                }
+                historico.append(novo_sinal)
+                salvar_historico()
+                msg = (
+                    f"📊 **NOVO SINAL TROIA-IA**\n"
+                    f"{ativo}: {sinal_tipo}\n"
+                    f"⏰ Entrada: {entrada.astimezone().strftime('%H:%M:%S')}\n"
+                    f"✅ Apenas 1 sinal ativo por vez"
+                )
+                try:
+                    bot.send_message(CHAT_ID, msg)
+                except Exception as e:
+                    print(f"Erro Telegram novo sinal: {e}")
+                break  # só 1 sinal por loop
 
-    time.sleep(10)
+    time.sleep(5)
