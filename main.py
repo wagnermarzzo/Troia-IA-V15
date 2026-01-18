@@ -1,207 +1,147 @@
-import requests
 import time
-import telebot
 import json
-import os
+import requests
 from datetime import datetime, timedelta
+import telebot
 
 # ===============================
-# CONFIGURAÇÃO FIXA
+# CONFIGURAÇÃO
 # ===============================
-TOKEN = "8536239572:AAG82o0mJw9WP3RKGrJTaLp-Hl2q8Gx6HYY"
-CHAT_ID = "2055716345"
 API_KEY = "128da1172fbb4aef83ca801cb3e6b928"
-bot = telebot.TeleBot(TOKEN, threaded=False)
+TOKEN = "8536239572:AAG82o0mJw9WP3RKGrJTaLp-Hl2q8HYY"
+CHAT_ID = "2055716345"
 
 ATIVOS = [
-    "EUR/USD", "GBP/USD", "AUD/USD", "NZD/USD",
-    "BTC/USD", "ETH/USD", "BNB/USD", "ADA/USD",
-    "SOL/USD", "XRP/USD"
+    "BTC/USD", "ETH/USD", "BNB/USD", "ADA/USD", "SOL/USD",
+    "XRP/USD", "EUR/USD", "GBP/USD", "AUD/USD", "NZD/USD"
 ]
 
-INTERVALO = 10  # Checagem a cada 10 segundos
-MOVIMENTO_MINIMO = 0.0005
-HIST_FILE = "historico.json"
+bot = telebot.TeleBot(TOKEN, threaded=False)
+historico_file = "historico.json"
 
-# Inicializa histórico
-if not os.path.exists(HIST_FILE):
-    with open(HIST_FILE, "w") as f:
-        json.dump([], f)
-
-stats = {"green_seq": 0, "total": 0, "acertos": 0, "erros": 0}
-
-ultimo_sinal = {
-    "ativo": None,
-    "sinal": None,
-    "prob": 0,
-    "resultado": None,
-    "hora_entrada": None,
-    "hora_analisada": None
-}
-
-# ===============================
-# FUNÇÕES AUXILIARES
-# ===============================
-
-def pegar_candles(ativo, limite=3):
-    url = f"https://api.twelvedata.com/time_series?symbol={ativo}&interval=1min&apikey={API_KEY}&outputsize={limite}"
-    try:
-        r = requests.get(url, timeout=5)
-        data = r.json()
-        if "values" not in data:
-            print(f"Erro API Twelve Data {ativo}: {data}")
-            return []
-
-        candles = []
-        for c in reversed(data["values"]):
-            try:
-                candles.append({
-                    "open": float(c["open"]),
-                    "high": float(c["high"]),
-                    "low": float(c["low"]),
-                    "close": float(c["close"]),
-                    "time": c["datetime"]
-                })
-            except:
-                continue
-        return candles
-    except Exception as e:
-        print(f"Erro ao pegar candles {ativo}: {e}")
-        return []
-
-def analisar_candles(candles):
-    if len(candles) < 3:
-        return None, 0
-    ultimo, prev1, prev2 = candles[-1], candles[-2], candles[-3]
-
-    movimento = abs(ultimo["close"] - ultimo["open"])
-    if movimento / ultimo["open"] < MOVIMENTO_MINIMO:
-        return None, 0
-
-    if ultimo["close"] > ultimo["open"] and prev1["close"] < prev1["open"]:
-        direcao = "CALL"
-    elif ultimo["close"] < ultimo["open"] and prev1["close"] > prev1["open"]:
-        direcao = "PUT"
-    else:
-        return None, 0
-
-    prob = 50
-    if (direcao == "CALL" and prev1["close"] > prev1["open"] and prev2["close"] > prev2["open"]) or \
-       (direcao == "PUT" and prev1["close"] < prev1["open"] and prev2["close"] < prev2["open"]):
-        prob = 80
-    else:
-        prob = 60
-
-    return direcao, prob
-
-# ===============================
-# FUNÇÕES DE SINAL E RESULTADO
-# ===============================
-
-def checar_resultado():
-    global ultimo_sinal, stats
-    if not ultimo_sinal["ativo"] or not ultimo_sinal["hora_entrada"]:
-        return False
-
-    # Pega candles recentes
-    candles = pegar_candles(ultimo_sinal["ativo"], limite=3)
-    if len(candles) < 2:
-        return False
-
-    # A vela de entrada é a vela anterior à mais recente
-    vela_entrada = candles[-2]
-    hora_entrada_candle = datetime.strptime(vela_entrada["time"], "%Y-%m-%d %H:%M:%S")
-
-    # Checa se o horário da vela bate com hora_entrada
-    if hora_entrada_candle != ultimo_sinal["hora_entrada"]:
-        return False  # Ainda não fechou a vela de entrada
-
-    if vela_entrada["close"] > vela_entrada["open"]:
-        resultado = "🟢 GREEN"
-    else:
-        resultado = "🔴 RED"
-
-    ultimo_sinal["resultado"] = resultado
-
-    stats["total"] += 1
-    if (ultimo_sinal["sinal"] == "CALL" and resultado == "🟢 GREEN") or \
-       (ultimo_sinal["sinal"] == "PUT" and resultado == "🟢 GREEN"):
-        stats["acertos"] += 1
-        stats["green_seq"] += 1
-    else:
-        stats["erros"] += 1
-        stats["green_seq"] = 0
-
-    # Salva histórico
-    with open(HIST_FILE, "r") as f:
+# Inicializa histórico se não existir
+try:
+    with open(historico_file, "r") as f:
         historico = json.load(f)
-    historico.append(ultimo_sinal)
-    with open(HIST_FILE, "w") as f:
-        json.dump(historico, f, indent=2)
+except:
+    historico = []
 
-    return True
-
-def proximo_sinal():
-    global ultimo_sinal
-    for ativo in ATIVOS:
-        candles = pegar_candles(ativo, limite=3)
-        if not candles:
-            continue
-        direcao, prob = analisar_candles(candles)
-        if direcao:
-            hora_analise = datetime.strptime(candles[-1]["time"], "%Y-%m-%d %H:%M:%S")
-            # A próxima vela fecha no minuto seguinte
-            hora_entrada = hora_analise + timedelta(minutes=1)
-            ultimo_sinal = {
-                "ativo": ativo,
-                "sinal": direcao,
-                "prob": prob,
-                "resultado": None,
-                "hora_entrada": hora_entrada,
-                "hora_analisada": hora_analise
-            }
-            return True
-    return False
+# Contadores
+green_seq = 0
+total = 0
+acertos = 0
+erros = 0
 
 # ===============================
-# PAINEL TELEGRAM
+# FUNÇÕES
 # ===============================
-def enviar_painel():
-    if ultimo_sinal["ativo"]:
-        sinal_emoji = "📈" if ultimo_sinal["sinal"]=="CALL" else "📉"
-        resultado = ultimo_sinal["resultado"] if ultimo_sinal["resultado"] else "🟡 PENDENTE"
-        mensagem = (
-            f"📊 **TROIA BOT IA - SINAL ÚNICO**\n\n"
-            f"{ultimo_sinal['ativo']}: {sinal_emoji} {ultimo_sinal['sinal']} | Prob={ultimo_sinal['prob']}%\n"
-            f"⏱ Analisada: {ultimo_sinal['hora_analisada'].strftime('%H:%M')}\n"
-            f"⏱ Entrada: {ultimo_sinal['hora_entrada'].strftime('%H:%M')}\n"
-            f"Resultado: {resultado}\n\n"
-            f"💚 Green Seq: {stats['green_seq']}\n"
-            f"📈 Total: {stats['total']} | Acertos: {stats['acertos']} | Erros: {stats['erros']} | Accuracy: {stats['acertos']*100/stats['total'] if stats['total']>0 else 0:.1f}%"
-        )
+
+def salvar_historico():
+    # Serializa datetime como string
+    serializado = []
+    for item in historico:
+        serializado.append({
+            "ativo": item["ativo"],
+            "sinal": item["sinal"],
+            "analise_hora": item["analise_hora"].strftime("%H:%M:%S"),
+            "entrada_hora": item["entrada_hora"].strftime("%H:%M:%S"),
+            "resultado": item["resultado"]
+        })
+    with open(historico_file, "w") as f:
+        json.dump(serializado, f, indent=2)
+
+def pegar_candle_1m(ativo):
+    url = f"https://api.twelvedata.com/time_series?symbol={ativo}&interval=1min&outputsize=2&apikey={API_KEY}"
+    r = requests.get(url).json()
+    if "values" in r:
+        # Última vela
+        return r["values"][0], r["values"][1]  # candle atual, anterior
     else:
-        mensagem = "🤖 IA está analisando, aguarde..."
-    bot.send_message(CHAT_ID, mensagem)
-    print(mensagem)
+        print(f"Erro API Twelve Data {ativo}: {r}")
+        return None, None
+
+def gerar_sinal(ativo):
+    # Aprendizado simples: baseia-se no último resultado do mesmo ativo
+    ultimo = next((x for x in reversed(historico) if x["ativo"] == ativo), None)
+    if ultimo:
+        if ultimo["resultado"] == "WIN":
+            return "CALL" if ultimo["sinal"] == "CALL" else "PUT"
+        else:
+            return "PUT" if ultimo["sinal"] == "CALL" else "CALL"
+    else:
+        # Sem histórico, sorteio 50/50
+        import random
+        return random.choice(["CALL", "PUT"])
+
+def checar_resultado(sinal, candle):
+    open_price = float(candle["open"])
+    close_price = float(candle["close"])
+    if sinal == "CALL":
+        return "WIN" if close_price > open_price else "LOSS"
+    else:
+        return "WIN" if close_price < open_price else "LOSS"
+
+def enviar_telegram(ativo, sinal, analise_hora, entrada_hora, resultado, green_seq, total, acertos, erros):
+    accuracy = (acertos/total*100) if total>0 else 0
+    msg = f"📊 **TROIA BOT IA - SINAL ÚNICO**\n"
+    msg += f"{ativo}: {('📈' if sinal=='CALL' else '📉')} {sinal}\n"
+    msg += f"⏱ Analisada: {analise_hora}\n"
+    msg += f"⏱ Entrada: {entrada_hora}\n"
+    msg += f"Resultado: {resultado if resultado else '🟡 PENDENTE'}\n"
+    msg += f"💚 Green Seq: {green_seq}\n"
+    msg += f"📈 Total: {total} | Acertos: {acertos} | Erros: {erros} | Accuracy: {accuracy:.1f}%"
+    bot.send_message(CHAT_ID, msg)
 
 # ===============================
 # LOOP PRINCIPAL
 # ===============================
-print("Troia Bot IA V17 - Vela 1M Profissional iniciado...")
-
 while True:
-    # Checa se último sinal já tem resultado
-    if ultimo_sinal["ativo"] and not ultimo_sinal["resultado"]:
-        if checar_resultado():
-            enviar_painel()
-            time.sleep(INTERVALO)
+    for ativo in ATIVOS:
+        candle_atual, candle_anterior = pegar_candle_1m(ativo)
+        if candle_atual is None:
+            bot.send_message(CHAT_ID, f"🤖 IA está analisando {ativo}, aguarde...")
             continue
 
-    # Envia próximo sinal
-    if not ultimo_sinal["resultado"]:
-        if proximo_sinal():
-            enviar_painel()
-        else:
-            enviar_painel()  # mensagem IA analisando
+        sinal = gerar_sinal(ativo)
+        analise_hora = datetime.now()
+        # Próxima vela
+        entrada_hora = analise_hora + timedelta(minutes=1)
+        resultado = None
 
-    time.sleep(INTERVALO)
+        # Adiciona ao histórico como PENDENTE
+        historico.append({
+            "ativo": ativo,
+            "sinal": sinal,
+            "analise_hora": analise_hora,
+            "entrada_hora": entrada_hora,
+            "resultado": resultado
+        })
+        salvar_historico()
+        enviar_telegram(ativo, sinal, analise_hora.strftime("%H:%M"), entrada_hora.strftime("%H:%M"), resultado, green_seq, total, acertos, erros)
+
+        # Espera a vela fechar
+        while datetime.now() < entrada_hora + timedelta(seconds=60):
+            time.sleep(1)
+
+        # Pega a vela fechada
+        candle_atual, _ = pegar_candle_1m(ativo)
+        resultado = checar_resultado(sinal, candle_atual)
+
+        # Atualiza histórico
+        historico[-1]["resultado"] = resultado
+        salvar_historico()
+
+        # Atualiza contadores
+        total += 1
+        if resultado == "WIN":
+            acertos += 1
+            green_seq += 1
+        else:
+            erros += 1
+            green_seq = 0
+
+        # Reenvia resultado no Telegram
+        enviar_telegram(ativo, sinal, analise_hora.strftime("%H:%M"), entrada_hora.strftime("%H:%M"), resultado, green_seq, total, acertos, erros)
+
+        # Espera 1s antes do próximo ativo para não estourar limite
+        time.sleep(1)
