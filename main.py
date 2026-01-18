@@ -10,10 +10,11 @@ TOKEN = "8536239572:AAG82o0mJw9WP3RKGrJTaLp-Hl2q8Gx6HYY"
 CHAT_ID = "2055716345"
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
+# Lista de ativos válidos Binance Spot
 ATIVOS = [
-    "EURUSDT", "GBPUSDT", "USDJPY", "AUDUSDT", "NZDUSDT",
-    "EURJPY", "GBPJPY", "EURGBP",
-    "BTCUSDT", "ETHUSDT", "BNBUSDT"
+    "EURUSDT", "GBPUSDT", "AUDUSDT", "NZDUSDT",
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "ADAUSDT",
+    "SOLUSDT", "XRPUSDT"
 ]
 
 INTERVALO = 60  # segundos
@@ -22,18 +23,11 @@ MOVIMENTO_MINIMO = 0.0005
 
 # Estatísticas globais
 stats = {
-    "total_sinais": 0,
-    "call": 0,
-    "put": 0,
-    "forte": 0,
-    "medio": 0,
-    "fraco": 0,
-    "alta_prob": 0,
     "green_seq": 0
 }
 
-# Últimos sinais para dashboard
-dashboard_sinais = {ativo: {"sinal": None, "forca": None, "prob": None, "resultado": "🟡"} for ativo in ATIVOS}
+# Últimos sinais de cada ativo
+sinais_ativos = {ativo: {"sinal": None, "forca": None, "prob": None, "resultado": "🟡"} for ativo in ATIVOS}
 
 # ===============================
 # PEGAR CANDLES
@@ -43,18 +37,27 @@ def pegar_candles(ativo, limite=3):
     try:
         r = requests.get(url, timeout=5)
         data = r.json()
+        
+        if not isinstance(data, list):
+            print(f"Erro API Binance {ativo}: {data}")
+            return []
+
         candles = []
         for c in data:
-            candles.append({
-                "open": float(c[1]),
-                "high": float(c[2]),
-                "low": float(c[3]),
-                "close": float(c[4]),
-                "time": datetime.datetime.fromtimestamp(int(c[0])/1000).strftime('%Y-%m-%d %H:%M:%S')
-            })
+            if isinstance(c, list) and len(c) >= 5:
+                try:
+                    candles.append({
+                        "open": float(c[1]),
+                        "high": float(c[2]),
+                        "low": float(c[3]),
+                        "close": float(c[4]),
+                        "time": datetime.datetime.fromtimestamp(int(c[0])/1000).strftime('%Y-%m-%d %H:%M:%S')
+                    })
+                except:
+                    continue
         return candles
     except Exception as e:
-        print("Erro ao pegar candles:", e)
+        print(f"Erro ao pegar candles {ativo}: {e}")
         return []
 
 # ===============================
@@ -79,35 +82,42 @@ def analisar_candles(candles):
     elif ultimo["close"] < ultimo["open"] and prev1["close"] > prev1["open"]:
         direcao = "PUT"
         forca = "Forte" if pct_mov > 0.002 else "Médio"
-    elif (ultimo["high"] - max(ultimo["open"], ultimo["close"])) / (ultimo["high"] - ultimo["low"]) > 0.6:
-        direcao = "PUT"
-        forca = "Médio"
-    elif (min(ultimo["open"], ultimo["close"]) - ultimo["low"]) / (ultimo["high"] - ultimo["low"]) > 0.6:
-        direcao = "CALL"
-        forca = "Médio"
-    elif ultimo["high"] < prev1["high"] and ultimo["low"] > prev1["low"]:
-        direcao = None
-        forca = "Fraco"
     else:
         return None, None, 0
 
+    # Probabilidade simples baseada nos últimos 3 candles
     prob = 50
     if (direcao == "CALL" and prev1["close"] > prev1["open"] and prev2["close"] > prev2["open"]) or \
        (direcao == "PUT" and prev1["close"] < prev1["open"] and prev2["close"] < prev2["open"]):
         prob = 80 if forca == "Forte" else 70
     elif forca == "Médio":
         prob = 60
-    else:
-        prob = 50
 
     return direcao, forca, prob
 
 # ===============================
-# ATUALIZA DASHBOARD
+# CHECAR RESULTADO VELA
 # ===============================
-def atualizar_dashboard():
-    mensagem = "📊 **TROIA BOT IA DASHBOARD**\n\n"
-    for ativo, info in dashboard_sinais.items():
+def checar_resultados():
+    for ativo in ATIVOS:
+        candles = pegar_candles(ativo, limite=2)
+        if len(candles) < 2:
+            continue
+        vela = candles[-1]
+        if vela["close"] > vela["open"]:
+            resultado = "🟢 GREEN"
+            stats["green_seq"] += 1
+        else:
+            resultado = "🔴 RED"
+            stats["green_seq"] = 0
+        sinais_ativos[ativo]["resultado"] = resultado
+
+# ===============================
+# ENVIAR PAINEL DE SINAIS
+# ===============================
+def enviar_sinais():
+    mensagem = "📊 **TROIA BOT IA - SINAIS**\n\n"
+    for ativo, info in sinais_ativos.items():
         sinal = info["sinal"] if info["sinal"] else "—"
         forca = info["forca"] if info["forca"] else "—"
         prob = f"{info['prob']}%" if info["prob"] else "—"
@@ -118,39 +128,22 @@ def atualizar_dashboard():
     print(mensagem)
 
 # ===============================
-# CHECAR RESULTADOS E ATUALIZAR DASHBOARD
-# ===============================
-def checar_resultados():
-    for ativo in ATIVOS:
-        candles = pegar_candles(ativo, limite=2)
-        if len(candles) < 2:
-            continue
-        vela_resultado = candles[-1]
-        # Green/Red baseado na vela real
-        if vela_resultado["close"] > vela_resultado["open"]:
-            resultado = "🟢 GREEN"
-            stats["green_seq"] += 1
-        else:
-            resultado = "🔴 RED"
-            stats["green_seq"] = 0
-        dashboard_sinais[ativo]["resultado"] = resultado
-
-# ===============================
 # LOOP PRINCIPAL
 # ===============================
-print("Troia Bot IA Dashboard iniciado...")
+print("Troia Bot IA iniciado...")
 while True:
+    # Analisar sinais para cada ativo
     for ativo in ATIVOS:
         candles = pegar_candles(ativo, limite=3)
         if candles:
             direcao, forca, prob = analisar_candles(candles)
             if direcao:
-                # Atualiza dashboard
-                dashboard_sinais[ativo]["sinal"] = direcao
-                dashboard_sinais[ativo]["forca"] = forca
-                dashboard_sinais[ativo]["prob"] = prob
-    # Checa resultados das velas reais
+                sinais_ativos[ativo]["sinal"] = direcao
+                sinais_ativos[ativo]["forca"] = forca
+                sinais_ativos[ativo]["prob"] = prob
+
+    # Checar resultados das velas reais
     checar_resultados()
-    # Envia dashboard completo
-    atualizar_dashboard()
+    # Enviar painel limpo de sinais
+    enviar_sinais()
     time.sleep(INTERVALO)
