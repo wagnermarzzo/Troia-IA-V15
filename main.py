@@ -24,7 +24,6 @@ ATIVOS = [
     "BTC/USD", "ETH/USD", "BNB/USD", "ADA/USD", "SOL/USD", "XRP/USD"
 ]
 
-# Símbolos para yfinance
 YF_SYMBOLS = {
     "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "USDJPY=X",
     "AUD/USD": "AUDUSD=X", "NZD/USD": "NZDUSD=X", "EUR/JPY": "EURJPY=X",
@@ -60,7 +59,6 @@ def candle_yf(ativo):
         if not data.empty:
             last = data.iloc[-1]
             time_candle = last.name.to_pydatetime()
-            # garantir datetime offset-aware
             if time_candle.tzinfo is None:
                 time_candle = time_candle.replace(tzinfo=timezone.utc)
             return {
@@ -72,13 +70,13 @@ def candle_yf(ativo):
         print(f"Erro yfinance {ativo}: {e}")
     return None
 
-def twelve_api_candle_cache(ativo):
+def candle_cache(ativo):
     agora = datetime.now(timezone.utc)
     if ativo in ultimo_candle:
         candle, ts = ultimo_candle[ativo]
         if (agora - ts).seconds < 60:
             return candle
-    candle = candle_yf(ativo) if USE_YFINANCE else None  # Twelve Data se quiser futuramente
+    candle = candle_yf(ativo)
     if candle:
         ultimo_candle[ativo] = (candle, agora)
     return candle
@@ -117,11 +115,10 @@ def calcular_probabilidade(ativo, tipo):
                 acertos += 1
     if total == 0:
         return 0
-    prob = int((acertos / total) * 100)
-    return prob
+    return int((acertos / total) * 100)
 
 def checar_resultado(sinal):
-    candle = twelve_api_candle_cache(sinal["ativo"])
+    candle = candle_cache(sinal["ativo"])
     if not candle or not candle_fechado(candle):
         return None
     close_p = candle["close"]
@@ -132,16 +129,15 @@ def checar_resultado(sinal):
         return "Green" if close_p < open_p else "Red"
 
 # ===============================
-# LOOP PRINCIPAL
+# LOOP PRINCIPAL (1 sinal por vez)
 # ===============================
 ultimo_status = datetime.now(timezone.utc) - timedelta(minutes=STATUS_INTERVAL)
-
 print("🤖 Troia Bot IA iniciado!")
 
 while True:
     agora = datetime.now(timezone.utc)
 
-    # 1️⃣ Mensagem periódica de referência (bot ativo)
+    # 1️⃣ Mensagem periódica de referência
     if (agora - ultimo_status).seconds >= STATUS_INTERVAL * 60:
         try:
             bot.send_message(CHAT_ID, "🤖 TROIA BOT IA está ativo e analisando os ativos...")
@@ -149,24 +145,28 @@ while True:
             print(f"Erro Telegram status: {e}")
         ultimo_status = agora
 
-    # 2️⃣ Checa sinais pendentes
-    for sinal_atual in [s for s in historico if s["resultado"] == "PENDENTE"]:
+    # 2️⃣ Checa se existe sinal pendente
+    sinal_atual = next((s for s in historico if s["resultado"] == "PENDENTE"), None)
+
+    if sinal_atual:
         resultado = checar_resultado(sinal_atual)
         if resultado:
             sinal_atual["resultado"] = resultado
             salvar_historico(historico)
             prob = calcular_probabilidade(sinal_atual["ativo"], sinal_atual["tipo"])
-            # envia resultado do sinal
+            destaque = "💥 ENTRADA SEGURA!" if prob >= PROB_THRESHOLD else ""
             try:
-                destaque = "💥 ENTRADA SEGURA!" if prob >= PROB_THRESHOLD else ""
                 msg = f"📊 **RESULTADO DO SINAL** {destaque}\n{sinal_atual['ativo']}: {sinal_atual['tipo']}\nResultado: {resultado}\nProbabilidade histórica: {prob}%"
                 bot.send_message(CHAT_ID, msg)
             except Exception as e:
                 print(f"Erro Telegram resultado: {e}")
+        # Espera o resultado antes de analisar próximo ativo
+        time.sleep(10)
+        continue
 
-    # 3️⃣ Analisa todos os ativos e gera novos sinais
+    # 3️⃣ Nenhum sinal pendente → gera próximo sinal
     for ativo in ATIVOS:
-        candle = twelve_api_candle_cache(ativo)
+        candle = candle_cache(ativo)
         if not candle or not candle_fechado(candle):
             continue
         sinal_tipo = gerar_sinal(candle)
@@ -188,5 +188,6 @@ while True:
                 bot.send_message(CHAT_ID, msg)
             except Exception as e:
                 print(f"Erro Telegram novo sinal: {e}")
+            break  # ⚠️ somente 1 sinal por vez
 
     time.sleep(10)
