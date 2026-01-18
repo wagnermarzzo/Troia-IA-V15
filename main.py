@@ -1,19 +1,24 @@
 import time
 import telebot
 import yfinance as yf
+from datetime import datetime, timedelta
+import pytz
 
 # ===============================
-# CONFIGURAÇÃO (SEUS DADOS)
+# CONFIGURAÇÃO TELEGRAM
 # ===============================
 TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 CHAT_ID = "2055716345"
 
-TEMPO_RESULTADO = 180  # 3 minutos reais
-
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
 # ===============================
-# ATIVOS (TODOS)
+# TIMEZONE
+# ===============================
+TZ = pytz.timezone("America/Sao_Paulo")
+
+# ===============================
+# ATIVOS
 # ===============================
 ATIVOS = [
     "EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "NZDUSD=X",
@@ -21,92 +26,111 @@ ATIVOS = [
 ]
 
 # ===============================
-# ESTADO GLOBAL
+# ESTADO GLOBAL (1 SINAL)
 # ===============================
-sinal_ativo = None
-ultimo_ativo_idx = 0
-
-print("🤖 Troia Bot IA iniciado!")
+estado = {
+    "ativo": None,
+    "tipo": None,
+    "candle_analise": None,
+    "candle_entrada": None
+}
 
 # ===============================
 # FUNÇÕES
 # ===============================
-def pegar_candle(symbol):
-    try:
-        df = yf.download(symbol, period="1d", interval="1m", progress=False)
-        if df.empty:
-            return None
-        last = df.iloc[-1]
-        return float(last["Open"]), float(last["Close"])
-    except Exception:
+def get_candle(symbol):
+    df = yf.download(symbol, period="1d", interval="1m", progress=False)
+    if df.empty:
         return None
 
-def gerar_sinal(open_p, close_p):
-    if close_p > open_p:
-        return "CALL"
-    elif close_p < open_p:
-        return "PUT"
-    return None
+    last = df.iloc[-1]
+    time_candle = last.name
+
+    if time_candle.tzinfo is None:
+        time_candle = pytz.utc.localize(time_candle)
+
+    return {
+        "open": float(last["Open"]),
+        "close": float(last["Close"]),
+        "time": time_candle.astimezone(TZ)
+    }
+
+def enviar_sinal(ativo, tipo, entrada):
+    bot.send_message(
+        CHAT_ID,
+        f"📊 *TROIA IA — SINAL*\n"
+        f"Ativo: `{ativo.replace('=X','')}`\n"
+        f"Direção: *{tipo}*\n"
+        f"Entrada: *{entrada.strftime('%H:%M')}*\n"
+        f"Timeframe: 1M",
+        parse_mode="Markdown"
+    )
+
+def enviar_resultado(ativo, tipo, resultado):
+    bot.send_message(
+        CHAT_ID,
+        f"📈 *RESULTADO — TROIA IA*\n"
+        f"Ativo: `{ativo.replace('=X','')}`\n"
+        f"Sinal: *{tipo}*\n"
+        f"Resultado: *{resultado}*",
+        parse_mode="Markdown"
+    )
 
 # ===============================
-# LOOP PRINCIPAL (CORRIGIDO)
+# START
 # ===============================
+print("🤖 Troia Bot IA iniciado!")
+
 while True:
-    agora_ts = time.time()
+    try:
+        agora = datetime.now(TZ)
 
-    # ===============================
-    # EXISTE SINAL ATIVO → ESPERA 3 MIN
-    # ===============================
-    if sinal_ativo:
-        if agora_ts - sinal_ativo["entrada_ts"] < TEMPO_RESULTADO:
-            time.sleep(2)
-            continue
+        # ==================================
+        # SE NÃO HÁ SINAL → ANALISA ATIVOS
+        # ==================================
+        if estado["ativo"] is None:
+            for ativo in ATIVOS:
+                candle = get_candle(ativo)
+                if not candle:
+                    continue
 
-        # CALCULA RESULTADO APÓS 3 MIN
-        candle = pegar_candle(sinal_ativo["ativo"])
-        if candle:
-            open_p, close_p = candle
-            resultado = "GREEN" if (
-                (sinal_ativo["tipo"] == "CALL" and close_p > open_p) or
-                (sinal_ativo["tipo"] == "PUT" and close_p < open_p)
-            ) else "RED"
+                tipo = "CALL" if candle["close"] > candle["open"] else "PUT"
+                entrada = candle["time"] + timedelta(minutes=1)
 
-            bot.send_message(
-                CHAT_ID,
-                f"📊 RESULTADO\n"
-                f"{sinal_ativo['ativo']}\n"
-                f"Sinal: {sinal_ativo['tipo']}\n"
-                f"Resultado: {resultado}"
-            )
+                estado.update({
+                    "ativo": ativo,
+                    "tipo": tipo,
+                    "candle_analise": candle["time"],
+                    "candle_entrada": entrada
+                })
 
-        sinal_ativo = None
-        time.sleep(5)
-        continue
+                enviar_sinal(ativo, tipo, entrada)
+                break
 
-    # ===============================
-    # SEM SINAL → ANALISA 1 ATIVO
-    # ===============================
-    ativo = ATIVOS[ultimo_ativo_idx]
-    ultimo_ativo_idx = (ultimo_ativo_idx + 1) % len(ATIVOS)
+        # ==================================
+        # AGUARDA CANDLE DA ENTRADA FECHAR
+        # ==================================
+        else:
+            candle = get_candle(estado["ativo"])
+            if candle and candle["time"] > estado["candle_entrada"]:
+                resultado = (
+                    "GREEN"
+                    if (estado["tipo"] == "CALL" and candle["close"] > candle["open"]) or
+                       (estado["tipo"] == "PUT" and candle["close"] < candle["open"])
+                    else "RED"
+                )
 
-    candle = pegar_candle(ativo)
-    if candle:
-        open_p, close_p = candle
-        sinal = gerar_sinal(open_p, close_p)
+                enviar_resultado(estado["ativo"], estado["tipo"], resultado)
 
-        if sinal:
-            sinal_ativo = {
-                "ativo": ativo,
-                "tipo": sinal,
-                "entrada_ts": time.time()
-            }
+                estado = {
+                    "ativo": None,
+                    "tipo": None,
+                    "candle_analise": None,
+                    "candle_entrada": None
+                }
 
-            bot.send_message(
-                CHAT_ID,
-                f"🚨 SINAL GERADO\n"
-                f"Ativo: {ativo}\n"
-                f"Direção: {sinal}\n"
-                f"⏱ Resultado em 3 minutos"
-            )
+        time.sleep(10)
 
-    time.sleep(10)
+    except Exception as e:
+        print("Erro:", e)
+        time.sleep(10)
