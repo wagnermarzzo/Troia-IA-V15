@@ -9,10 +9,9 @@ import telebot
 # ===============================
 TOKEN = "8536239572:AAEkewewiT25GzzwSWNVQL2ZRQ2ITRHTdVU"
 CHAT_ID = "2055716345"
-API_KEY = "128da1172fbb4aef83ca801cb3e6b928"
-USE_YFINANCE = True
+USE_YFINANCE = True  # True = Yahoo Finance (Forex + Cripto)
 STATUS_INTERVAL = 5  # minutos entre mensagens de "bot ativo"
-THRESHOLD = 0.0005  # 0.05% de variação mínima
+PROB_THRESHOLD = 60  # Probabilidade mínima (%) para sinal destacado
 
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
@@ -25,10 +24,20 @@ ATIVOS = [
     "BTC/USD", "ETH/USD", "BNB/USD", "ADA/USD", "SOL/USD", "XRP/USD"
 ]
 
+# Símbolos para yfinance
+YF_SYMBOLS = {
+    "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "USDJPY=X",
+    "AUD/USD": "AUDUSD=X", "NZD/USD": "NZDUSD=X", "EUR/JPY": "EURJPY=X",
+    "GBP/JPY": "GBPJPY=X", "EUR/GBP": "EURGBP=X",
+    "BTC/USD": "BTC-USD", "ETH/USD": "ETH-USD", "BNB/USD": "BNB-USD",
+    "ADA/USD": "ADA-USD", "SOL/USD": "SOL-USD", "XRP/USD": "XRP-USD"
+}
+
 # ===============================
 # HISTÓRICO
 # ===============================
 HISTORICO_FILE = "historico.json"
+
 try:
     with open(HISTORICO_FILE, "r") as f:
         historico = json.load(f)
@@ -38,43 +47,27 @@ except FileNotFoundError:
 # ===============================
 # CACHE DE CANDLES
 # ===============================
-ultimo_candle = {}
+ultimo_candle = {}  # chave = ativo, valor = (candle, timestamp)
 
 # ===============================
 # FUNÇÕES
 # ===============================
-def twelve_api_candle(ativo):
-    symbol = ativo.replace("/", "")
-    url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval=1min&apikey={API_KEY}&outputsize=2"
-    try:
-        resp = requests.get(url, timeout=10).json()
-        if "values" in resp:
-            val = resp["values"][0]
-            return {
-                "open": float(val["open"]),
-                "close": float(val["close"]),
-                "time": datetime.strptime(val["datetime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-            }
-        else:
-            print(f"Erro API Twelve Data {ativo}: {resp}")
-            return None
-    except Exception as e:
-        print(f"Erro requisição {ativo}: {e}")
-        return None
-
 def candle_yf(ativo):
     try:
         import yfinance as yf
-        symbol = ativo.replace("/", "") + "=X"
+        symbol = YF_SYMBOLS.get(ativo)
         data = yf.download(symbol, period="1d", interval="1m", progress=False)
         if not data.empty:
             last = data.iloc[-1]
             time_candle = last.name.to_pydatetime()
+            # garantir datetime offset-aware
             if time_candle.tzinfo is None:
                 time_candle = time_candle.replace(tzinfo=timezone.utc)
-            open_val = float(last["Open"].iloc[0]) if hasattr(last["Open"], "iloc") else float(last["Open"])
-            close_val = float(last["Close"].iloc[0]) if hasattr(last["Close"], "iloc") else float(last["Close"])
-            return {"open": open_val, "close": close_val, "time": time_candle}
+            return {
+                "open": float(last["Open"].iloc[0]) if hasattr(last["Open"], "iloc") else float(last["Open"]),
+                "close": float(last["Close"].iloc[0]) if hasattr(last["Close"], "iloc") else float(last["Close"]),
+                "time": time_candle
+            }
     except Exception as e:
         print(f"Erro yfinance {ativo}: {e}")
     return None
@@ -85,7 +78,7 @@ def twelve_api_candle_cache(ativo):
         candle, ts = ultimo_candle[ativo]
         if (agora - ts).seconds < 60:
             return candle
-    candle = candle_yf(ativo) if USE_YFINANCE else twelve_api_candle(ativo)
+    candle = candle_yf(ativo) if USE_YFINANCE else None  # Twelve Data se quiser futuramente
     if candle:
         ultimo_candle[ativo] = (candle, agora)
     return candle
@@ -93,13 +86,13 @@ def twelve_api_candle_cache(ativo):
 def gerar_sinal(candle):
     if not candle:
         return None
-    open_p = float(candle["open"])
-    close_p = float(candle["close"])
-    diff = abs(close_p - open_p)
-    # só considera se passar threshold
-    if diff / open_p < THRESHOLD:
-        return None
-    return "CALL" if close_p > open_p else "PUT"
+    open_p = candle["open"]
+    close_p = candle["close"]
+    if close_p > open_p:
+        return "CALL"
+    elif close_p < open_p:
+        return "PUT"
+    return None
 
 def salvar_historico(h):
     for entry in h:
@@ -109,29 +102,38 @@ def salvar_historico(h):
     with open(HISTORICO_FILE, "w") as f:
         json.dump(h, f, indent=2)
 
-def checar_resultado(sinal):
-    candle = twelve_api_candle_cache(sinal["ativo"])
-    if not candle:
-        return None
-    close_p = float(candle["close"])
-    open_p = float(candle["open"])
-    if sinal["tipo"] == "CALL":
-        return "💚 Green" if close_p > open_p else "🔴 Red"
-    else:
-        return "💚 Green" if close_p < open_p else "🔴 Red"
-
 def candle_fechado(candle):
-    """Verifica se candle já fechou"""
     agora = datetime.now(timezone.utc)
     return agora >= candle["time"] + timedelta(minutes=1)
+
+def calcular_probabilidade(ativo, tipo):
+    total = 0
+    acertos = 0
+    for entry in historico:
+        if entry["ativo"] == ativo and entry["resultado"] in ["Green", "Red"]:
+            total += 1
+            if (entry["tipo"] == "CALL" and entry["resultado"] == "Green") or \
+               (entry["tipo"] == "PUT" and entry["resultado"] == "Green"):
+                acertos += 1
+    if total == 0:
+        return 0
+    prob = int((acertos / total) * 100)
+    return prob
+
+def checar_resultado(sinal):
+    candle = twelve_api_candle_cache(sinal["ativo"])
+    if not candle or not candle_fechado(candle):
+        return None
+    close_p = candle["close"]
+    open_p = candle["open"]
+    if sinal["tipo"] == "CALL":
+        return "Green" if close_p > open_p else "Red"
+    else:
+        return "Green" if close_p < open_p else "Red"
 
 # ===============================
 # LOOP PRINCIPAL
 # ===============================
-green_seq = 0
-total = 0
-acertos = 0
-erros = 0
 ultimo_status = datetime.now(timezone.utc) - timedelta(minutes=STATUS_INTERVAL)
 
 print("🤖 Troia Bot IA iniciado!")
@@ -139,7 +141,7 @@ print("🤖 Troia Bot IA iniciado!")
 while True:
     agora = datetime.now(timezone.utc)
 
-    # 1️⃣ Mensagem periódica de status
+    # 1️⃣ Mensagem periódica de referência (bot ativo)
     if (agora - ultimo_status).seconds >= STATUS_INTERVAL * 60:
         try:
             bot.send_message(CHAT_ID, "🤖 TROIA BOT IA está ativo e analisando os ativos...")
@@ -148,52 +150,43 @@ while True:
         ultimo_status = agora
 
     # 2️⃣ Checa sinais pendentes
-    for sinal_atual in [h for h in historico if h["resultado"] == "PENDENTE"]:
-        candle = twelve_api_candle_cache(sinal_atual["ativo"])
-        if candle and candle_fechado(candle):
-            resultado = checar_resultado(sinal_atual)
-            if resultado:
-                sinal_atual["resultado"] = resultado
-                salvar_historico(historico)
-                total += 1
-                if "Green" in resultado:
-                    acertos += 1
-                    green_seq += 1
-                else:
-                    erros += 1
-                    green_seq = 0
-                try:
-                    msg = f"📊 *RESULTADO DO SINAL*\nAtivo: `{sinal_atual['ativo']}`\nTipo: *{sinal_atual['tipo']}*\nResultado: {resultado}\n💚 Green Seq: {green_seq}\n📈 Total: {total} | Acertos: {acertos} | Erros: {erros}"
-                    bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                except Exception as e:
-                    print(f"Erro Telegram resultado: {e}")
+    for sinal_atual in [s for s in historico if s["resultado"] == "PENDENTE"]:
+        resultado = checar_resultado(sinal_atual)
+        if resultado:
+            sinal_atual["resultado"] = resultado
+            salvar_historico(historico)
+            prob = calcular_probabilidade(sinal_atual["ativo"], sinal_atual["tipo"])
+            # envia resultado do sinal
+            try:
+                destaque = "💥 ENTRADA SEGURA!" if prob >= PROB_THRESHOLD else ""
+                msg = f"📊 **RESULTADO DO SINAL** {destaque}\n{sinal_atual['ativo']}: {sinal_atual['tipo']}\nResultado: {resultado}\nProbabilidade histórica: {prob}%"
+                bot.send_message(CHAT_ID, msg)
+            except Exception as e:
+                print(f"Erro Telegram resultado: {e}")
 
-    # 3️⃣ Analisa todos os ativos e gera novos sinais confiáveis
+    # 3️⃣ Analisa todos os ativos e gera novos sinais
     for ativo in ATIVOS:
         candle = twelve_api_candle_cache(ativo)
-        if candle and candle_fechado(candle):
-            sinal_tipo = gerar_sinal(candle)
-            if sinal_tipo:
-                agora = datetime.now(timezone.utc)
-                entrada = agora + timedelta(minutes=1)
-                # evita duplicar sinal para o mesmo candle
-                exists = any(h["ativo"] == ativo and h["entrada"] == entrada.strftime("%Y-%m-%d %H:%M:%S") for h in historico)
-                if exists:
-                    continue
-                novo_sinal = {
-                    "ativo": ativo,
-                    "tipo": sinal_tipo,
-                    "analisada": agora,
-                    "entrada": entrada,
-                    "resultado": "PENDENTE"
-                }
-                historico.append(novo_sinal)
-                salvar_historico(historico)
-                try:
-                    emoji = "📈" if sinal_tipo == "CALL" else "📉"
-                    msg = f"📊 *TROIA BOT IA - NOVO SINAL*\nAtivo: `{ativo}` {emoji}\nTipo: *{sinal_tipo}*\nEntrada: `{entrada.strftime('%H:%M')}`"
-                    bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                except Exception as e:
-                    print(f"Erro Telegram novo sinal: {e}")
+        if not candle or not candle_fechado(candle):
+            continue
+        sinal_tipo = gerar_sinal(candle)
+        if sinal_tipo:
+            entrada = agora + timedelta(minutes=1)
+            novo_sinal = {
+                "ativo": ativo,
+                "tipo": sinal_tipo,
+                "analisada": agora,
+                "entrada": entrada,
+                "resultado": "PENDENTE"
+            }
+            historico.append(novo_sinal)
+            salvar_historico(historico)
+            prob = calcular_probabilidade(ativo, sinal_tipo)
+            destaque = "💥 ENTRADA SEGURA!" if prob >= PROB_THRESHOLD else ""
+            try:
+                msg = f"📊 **TROIA BOT IA - NOVO SINAL** {destaque}\n{ativo}: {sinal_tipo}\nEntrada: {entrada.strftime('%H:%M')}\nProbabilidade histórica: {prob}%"
+                bot.send_message(CHAT_ID, msg)
+            except Exception as e:
+                print(f"Erro Telegram novo sinal: {e}")
 
     time.sleep(10)
