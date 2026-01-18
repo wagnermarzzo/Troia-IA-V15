@@ -136,7 +136,7 @@ while True:
                     print(f"Erro Telegram: {e}")
                 break
         if not sinal_atual:
-            time.sleep(5)
+            time.sleep(60)
             continue
 
     # Espera a vela de entrada terminar
@@ -163,4 +163,4 @@ while True:
             except Exception as e:
                 print(f"Erro Telegram: {e}")
 
-    time.sleep(5)  # reduz chamadas à API
+    time.sleep(60)  # reduz chamadas à API
