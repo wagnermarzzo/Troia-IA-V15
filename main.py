@@ -3,6 +3,7 @@ import time
 import telebot
 import json
 import os
+from datetime import datetime, timedelta
 
 # ===============================
 # CONFIGURAÇÃO FIXA
@@ -12,29 +13,31 @@ CHAT_ID = "2055716345"
 API_KEY = "128da1172fbb4aef83ca801cb3e6b928"
 bot = telebot.TeleBot(TOKEN, threaded=False)
 
-# Lista de ativos válidos
 ATIVOS = [
     "EUR/USD", "GBP/USD", "AUD/USD", "NZD/USD",
     "BTC/USD", "ETH/USD", "BNB/USD", "ADA/USD",
     "SOL/USD", "XRP/USD"
 ]
 
-INTERVALO = 60  # segundos entre checagens
+INTERVALO = 10  # Checagem a cada 10 segundos
 MOVIMENTO_MINIMO = 0.0005
-
-# Arquivo de histórico de sinais
 HIST_FILE = "historico.json"
 
-# Inicializa histórico se não existir
+# Inicializa histórico
 if not os.path.exists(HIST_FILE):
     with open(HIST_FILE, "w") as f:
         json.dump([], f)
 
-# Estatísticas globais
 stats = {"green_seq": 0, "total": 0, "acertos": 0, "erros": 0}
 
-# Último sinal enviado (sinal único)
-ultimo_sinal = {"ativo": None, "sinal": None, "prob": 0, "resultado": None}
+ultimo_sinal = {
+    "ativo": None,
+    "sinal": None,
+    "prob": 0,
+    "resultado": None,
+    "hora_entrada": None,
+    "hora_analisada": None
+}
 
 # ===============================
 # FUNÇÕES AUXILIARES
@@ -66,7 +69,6 @@ def pegar_candles(ativo, limite=3):
         print(f"Erro ao pegar candles {ativo}: {e}")
         return []
 
-# Análise de price action simples
 def analisar_candles(candles):
     if len(candles) < 3:
         return None, 0
@@ -83,7 +85,6 @@ def analisar_candles(candles):
     else:
         return None, 0
 
-    # Probabilidade inicial baseada em padrão
     prob = 50
     if (direcao == "CALL" and prev1["close"] > prev1["open"] and prev2["close"] > prev2["open"]) or \
        (direcao == "PUT" and prev1["close"] < prev1["open"] and prev2["close"] < prev2["open"]):
@@ -93,25 +94,35 @@ def analisar_candles(candles):
 
     return direcao, prob
 
-# Atualiza resultado do último sinal
+# ===============================
+# FUNÇÕES DE SINAL E RESULTADO
+# ===============================
+
 def checar_resultado():
     global ultimo_sinal, stats
-    if not ultimo_sinal["ativo"]:
-        return False  # nenhum sinal enviado ainda
+    if not ultimo_sinal["ativo"] or not ultimo_sinal["hora_entrada"]:
+        return False
 
-    candles = pegar_candles(ultimo_sinal["ativo"], limite=2)
+    # Pega candles recentes
+    candles = pegar_candles(ultimo_sinal["ativo"], limite=3)
     if len(candles) < 2:
         return False
 
-    vela = candles[-1]
-    if vela["close"] > vela["open"]:
+    # A vela de entrada é a vela anterior à mais recente
+    vela_entrada = candles[-2]
+    hora_entrada_candle = datetime.strptime(vela_entrada["time"], "%Y-%m-%d %H:%M:%S")
+
+    # Checa se o horário da vela bate com hora_entrada
+    if hora_entrada_candle != ultimo_sinal["hora_entrada"]:
+        return False  # Ainda não fechou a vela de entrada
+
+    if vela_entrada["close"] > vela_entrada["open"]:
         resultado = "🟢 GREEN"
     else:
         resultado = "🔴 RED"
 
     ultimo_sinal["resultado"] = resultado
 
-    # Atualiza estatísticas
     stats["total"] += 1
     if (ultimo_sinal["sinal"] == "CALL" and resultado == "🟢 GREEN") or \
        (ultimo_sinal["sinal"] == "PUT" and resultado == "🟢 GREEN"):
@@ -128,9 +139,8 @@ def checar_resultado():
     with open(HIST_FILE, "w") as f:
         json.dump(historico, f, indent=2)
 
-    return True  # sinal processado
+    return True
 
-# Escolhe o próximo sinal baseado no histórico
 def proximo_sinal():
     global ultimo_sinal
     for ativo in ATIVOS:
@@ -139,19 +149,33 @@ def proximo_sinal():
             continue
         direcao, prob = analisar_candles(candles)
         if direcao:
-            # envia apenas se não houver sinal em andamento
-            ultimo_sinal = {"ativo": ativo, "sinal": direcao, "prob": prob, "resultado": None}
+            hora_analise = datetime.strptime(candles[-1]["time"], "%Y-%m-%d %H:%M:%S")
+            # A próxima vela fecha no minuto seguinte
+            hora_entrada = hora_analise + timedelta(minutes=1)
+            ultimo_sinal = {
+                "ativo": ativo,
+                "sinal": direcao,
+                "prob": prob,
+                "resultado": None,
+                "hora_entrada": hora_entrada,
+                "hora_analisada": hora_analise
+            }
             return True
     return False
 
-# Envia painel profissional para Telegram
+# ===============================
+# PAINEL TELEGRAM
+# ===============================
 def enviar_painel():
     if ultimo_sinal["ativo"]:
         sinal_emoji = "📈" if ultimo_sinal["sinal"]=="CALL" else "📉"
         resultado = ultimo_sinal["resultado"] if ultimo_sinal["resultado"] else "🟡 PENDENTE"
         mensagem = (
             f"📊 **TROIA BOT IA - SINAL ÚNICO**\n\n"
-            f"{ultimo_sinal['ativo']}: {sinal_emoji} {ultimo_sinal['sinal']} | Prob={ultimo_sinal['prob']}% | Resultado={resultado}\n\n"
+            f"{ultimo_sinal['ativo']}: {sinal_emoji} {ultimo_sinal['sinal']} | Prob={ultimo_sinal['prob']}%\n"
+            f"⏱ Analisada: {ultimo_sinal['hora_analisada'].strftime('%H:%M')}\n"
+            f"⏱ Entrada: {ultimo_sinal['hora_entrada'].strftime('%H:%M')}\n"
+            f"Resultado: {resultado}\n\n"
             f"💚 Green Seq: {stats['green_seq']}\n"
             f"📈 Total: {stats['total']} | Acertos: {stats['acertos']} | Erros: {stats['erros']} | Accuracy: {stats['acertos']*100/stats['total'] if stats['total']>0 else 0:.1f}%"
         )
@@ -163,20 +187,21 @@ def enviar_painel():
 # ===============================
 # LOOP PRINCIPAL
 # ===============================
-print("Troia Bot IA V17 Profissional iniciado...")
+print("Troia Bot IA V17 - Vela 1M Profissional iniciado...")
+
 while True:
-    # Primeiro, checa se o último sinal já tem resultado
+    # Checa se último sinal já tem resultado
     if ultimo_sinal["ativo"] and not ultimo_sinal["resultado"]:
         if checar_resultado():
             enviar_painel()
             time.sleep(INTERVALO)
-            continue  # só envia o próximo sinal depois de processar
+            continue
 
     # Envia próximo sinal
     if not ultimo_sinal["resultado"]:
         if proximo_sinal():
             enviar_painel()
         else:
-            enviar_painel()  # mensagem de IA analisando
+            enviar_painel()  # mensagem IA analisando
 
     time.sleep(INTERVALO)
